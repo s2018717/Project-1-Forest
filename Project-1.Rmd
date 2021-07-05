@@ -1,0 +1,1167 @@
+---
+title: "Project 1: Code"
+author: "Yang Yang"
+date: "11/06/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+library(Hmisc)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(ggthemes)
+library(caret)
+library(MASS)
+library(mgcv)
+library(randomForest)
+library(pROC)
+library(corrplot)
+library(mice)
+library(VIM)
+setwd("~/Documents/Dissertation")
+```
+
+# 1 Introduction
+
+## 1.1 Background and Motivation
+## 1.2 Data
+
+
+# 2 Exploratory & initial data analysis
+
+Load the data and change some categorical variable type: from numeric to factor
+
+```{r data}
+foresthealth <- read.table("foresthealth.txt", sep=";", header=TRUE, stringsAsFactors = TRUE)
+#summary(foresthealth)
+forest <- foresthealth
+
+# ordered factor
+forest$basa_lev <- factor(forest$basa_lev, order=TRUE)
+forest$nutri_no <- factor(forest$nutri_no, order=TRUE)
+forest$skel_no <- factor(forest$skel_no, order=TRUE)
+forest$depth_no <- factor(forest$depth_no, order=TRUE)
+forest$crown_lev <- factor(forest$crown_lev, order=TRUE)
+
+forest$fruct_lev <- ifelse(forest$fruct_lev <= 1, 1, forest$fruct_lev)
+forest$fruct_lev <- ifelse(forest$fruct_lev <= 2 &forest$fruct_lev > 1 , 2, forest$fruct_lev)
+forest$fruct_lev <- ifelse(forest$fruct_lev <= 3 &forest$fruct_lev > 2 , 3, forest$fruct_lev)
+forest$fruct_lev <- factor(forest$fruct_lev, order=TRUE)
+
+# factor
+forest$gw <- factor(forest$gw)
+forest$sw <- factor(forest$sw)
+forest$geol_no <- factor(forest$geol_no)
+forest$soil_no <-factor(forest$soil_no)
+forest$soil_ty_no <- factor(forest$soil_ty_no)
+forest$humus_no <- factor(forest$humus_no)
+forest$water_no <- factor(forest$water_no)
+forest$slope_dir <- factor(forest$slope_dir)
+
+#str(forest)
+```
+
+Introduce a function that change the response $nbv\_ratio$ into a categorical variable:
+
+```{r}
+code.levels <- function(x){
+  x <- ifelse(x <= 0.1, "undamaged", x)
+  x <- ifelse(x <= 0.25 & x > 0.1, "light damage", x)
+  x <- ifelse(x <= 0.6 & x > 0.25, "medium damage", x)
+  x <- ifelse(x <= 1 & x > 0.6, "severe damage", x)
+  x <- factor(x, order=TRUE)
+}
+
+defoliation <- code.levels(forest$nbv_ratio)
+forest <- cbind(forest, defoliation)
+```
+
+Draw the plots of $nbv\_ratio$:
+
+```{r}
+# Histogram of defoliation for different tree species
+ggplot(
+  forest,
+  aes(
+    x = nbv_ratio
+  )
+) +
+  geom_histogram(bins = 20) +
+  facet_wrap(~ tree_sp_eu, ncol = 3) +
+  labs(
+    title = "Histogram of defoliation",
+    x = "tree species"
+  )
+
+# Barplot of defoliation for six tree species
+ggplot(
+  forest,
+  aes(
+    x = tree_sp_eu,
+    fill = defoliation
+  )
+) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "Barplot of defoliation for six tree species",
+    x = "tree species"
+  )
+
+# Boxplot of defoliation for six tree species
+ggplot(
+  forest,
+  aes(
+    x = tree_sp_eu,
+    y = nbv_ratio,
+    fill = tree_sp_eu
+  )
+) +
+  geom_boxplot() +
+  labs(
+    title = "Boxplot of defoliation for six tree species",
+    x = "tree species",
+    y = "defoliation"
+  ) +
+  ggthemes::scale_fill_gdocs() +
+  guides(color = FALSE)
+
+# Line plot of yearly mean defoliation against time
+nbv_year_sp <- forest %>%
+  group_by(year,tree_sp_eu) %>% 
+  summarise(
+    mean(nbv_ratio),
+    .groups = "keep")
+
+ggplot(
+  nbv_year_sp, 
+  aes(
+    x = year, 
+    y = `mean(nbv_ratio)`, 
+    color = tree_sp_eu)
+  ) +
+  geom_point(size = 0.8) + 
+  geom_smooth(size = 0.8) + 
+  facet_wrap(~ tree_sp_eu, ncol = 3) +
+  ggtitle("Line plot of yearly mean defoliation against time") + 
+  labs(y = "yearly average defoliation") +
+  guides(color = FALSE)
+
+# The distribution of different tree species
+ggplot(
+  forest,
+  aes(
+    x = x_utm,
+    y = y_utm
+  )
+) +
+  geom_point(
+    aes(
+      color = defoliation,
+      shape = tree_sp_eu
+    ),
+    size = 0.7
+  ) +
+  theme_void()
+```
+
+Separate the data into 6 subsets according to the tree species.
+Since there are too many missing values for variables tmean_y, tmin_may,..., cwb_y_lag1 in 15 lines, delete these rows. 
+
+```{r}
+# delete the rows including many missing values
+fh <- forest
+row <- which(is.na(fh$tmean_y))
+fh <- fh[-row,]
+
+# 6 Subsets
+col <- c("X", "id", "defoliation")
+fh <- fh[, !colnames(fh) %in% col]
+fh$gw <- ifelse(is.na(fh$gw), 0, fh$gw)
+fh$sw <- ifelse(is.na(fh$sw), 0, fh$sw)
+
+Rbu <- fh %>% filter(tree_sp_eu == "Rbu")
+Gfi <- fh %>% filter(tree_sp_eu == "Gfi")
+Gki <- fh %>% filter(tree_sp_eu == "Gki")
+Tei <- fh %>% filter(tree_sp_eu == "Tei")
+Wta <- fh %>% filter(tree_sp_eu == "Wta")
+Dgl <- fh %>% filter(tree_sp_eu == "Dgl")
+```
+
+Impute the missing values:
+
+```{r}
+# a function imputing missing data
+impute.data <- function(df) {
+  
+  # mean imputation: 20 variables
+  var.1 <- c("alt_m", "Ed", "H_bhd", "s_veg", "d_veg", "spei_12_oct", "spei_24_oct",
+             "spei_3_aug", "spei_6_sep", "relawat_mean","d_relawat04","stres_mean", 
+             "awat_mean", "tran_mean", "defsum_tdiff", "defsum_awat04_d", "psilogmean_mean",
+             "defsum_psi1200", "n_tot_wd", "ac_tot_wd")
+  
+  for (var in var.1){
+    df[,var] <- impute(df[,var], mean)
+  }
+  
+  # median imputation for skewness distribution: 9 variables
+  var.2 <- c("slope_deg", "Es", "spei_3_may", "d_psi1200", "defsum_awat04_l", "s_vals",
+             "depth_mm", "nfk", "skel_perc")
+  for (var in var.2){    
+    df[,var] <- impute(df[,var], median)
+  }
+  
+  # mode imputation: 14 variables
+  df1 <- df %>% 
+    select_if(function(x) !is.numeric(x)) %>%
+    map_dfc(~ replace_na(.x, rstatix::get_mode(.x)[1]))
+  var.3 <- names(df1)
+  for (var in var.3){
+    df[,var] <- df1[,var]
+  }
+  
+  df <- df[,!colnames(df) == "tree_sp_eu"]
+  return(df)
+}
+
+#summary(Gfi)
+Dgl.imp <- impute.data(Dgl)
+Gfi.imp <- impute.data(Gfi)
+Gki.imp <- impute.data(Gki)
+Rbu.imp <- impute.data(Rbu)
+Tei.imp <- impute.data(Tei)
+Wta.imp <- impute.data(Wta)
+
+# Dgl and Wta: missed all s_veg and d_veg values
+col <- c("s_veg", "d_veg")
+Dgl.imp <- Dgl.imp[, !colnames(Dgl.imp) %in% col] # s_veg and d_veg are missing all values
+Wta.imp <- Wta.imp[, !colnames(Wta.imp) %in% col] # s_veg and d_veg are missing all values
+
+# Check if all missing values have been imputed
+# If that, all result should be 0
+sum(is.na(Dgl.imp))
+sum(is.na(Gfi.imp))
+sum(is.na(Gki.imp))
+sum(is.na(Rbu.imp))
+sum(is.na(Tei.imp))
+sum(is.na(Wta.imp))
+```
+
+Correlation:
+
+```{r}
+forest.imp <- impute.data(forest)
+
+forest.num <- forest.imp %>% 
+  select_if(function(x) is.numeric(x))
+  
+
+forest.cor <- forest.num[,-1] %>%
+  cor(use="pairwise.complete")
+
+dim(forest.cor)
+
+corrplot(forest.cor, order="hclust",
+         diag=FALSE,
+         tl.col="black", tl.cex = 0.5,
+         title="Correlation matrix", 
+         type = 'upper',
+         mar=c(0,0,1,0))
+```
+
+# 3 Variable selection
+
+## 3.1 Random forest
+
+1. Rbu:
+
+Fit random forests model and select significant variables:
+
+```{r}
+# Separate the Rbu data into training set and test set
+set.seed(123)
+train.ind <- createDataPartition(Rbu.imp$nbv_ratio, p=0.7)$Resample1 # 70-30 split
+train.set <- Rbu.imp[train.ind,]
+test.set <- Rbu.imp[-train.ind,]
+dim(train.set)
+dim(test.set)
+
+# Model training
+set.seed(123)
+fit.rf.Rbu <- randomForest(nbv_ratio ~., data=train.set, importance=TRUE, na.action=na.pass)
+
+print(fit.rf.Rbu, main="randomforest of Rbu")
+
+# Important matrix
+importantce <- data.frame(round(importance(fit.rf.Rbu),2))
+importantce[order(-importantce$IncNodePurity),]
+varImpPlot(fit.rf.Rbu, n.var = 14)
+plot(fit.rf.Rbu,main="randomforest origin")
+```
+
+Performance Evaluation for RF:
+
+```{r}
+pred.Rbu <- predict(fit.rf.Rbu,newdata=test.set)
+
+pred.Rbu <- code.levels(pred.Rbu)
+ratio <- code.levels(test.set$nbv_ratio)
+table <- confusionMatrix(pred.Rbu, ratio)$table
+table
+
+# predicting accuracy
+sum(diag(table))/sum(table)
+```
+
+Extract the selected variables and save them into data frame Rbu.dt:
+
+```{r}
+importance <- data.frame(round(importance(fit.rf.Rbu),2))
+importance <- importance[order(-importance$IncNodePurity),]
+threshold = 0.8
+var <- importance %>% 
+  filter(IncNodePurity >= threshold) %>%
+  rownames()
+var
+var <- c(var, "nbv_ratio")
+Rbu.dt <- Rbu.imp[, colnames(Rbu.imp) %in% var]
+```
+
+
+2. Gfi
+
+Fit random forests model and select significant variables:
+
+```{r}
+# Separate the data into training set and test set
+set.seed(123)
+train.ind <- createDataPartition(Gfi$nbv_ratio, p=0.7)$Resample1 # 70-30 split
+train.set <- Gfi.imp[train.ind,]
+test.set <- Gfi.imp[-train.ind,]
+dim(train.set)
+dim(test.set)
+
+# Model training
+set.seed(123)
+fit.rf.Gfi <- randomForest(nbv_ratio ~., data=train.set, importance=TRUE, na.action=na.pass)
+
+print(fit.rf.Gfi, main="randomforest of Gfi")
+
+importance <- data.frame(round(importance(fit.rf.Gfi),2))
+importance[order(-importance$IncNodePurity),]
+varImpPlot(fit.rf.Gfi, n.var = 22)
+plot(fit.rf.Gfi,main="randomforest origin")
+```
+
+Performance Evaluation for RF:
+
+```{r}
+pred.Gfi <- predict(fit.rf.Gfi,newdata=test.set)
+
+pred.Gfi <- code.levels(pred.Gfi)
+ratio <- code.levels(test.set$nbv_ratio)
+table <- confusionMatrix(pred.Gfi, ratio)$table
+table
+
+# predicting accuracy
+sum(diag(table))/sum(table)
+```
+
+Extract the selected variables and save them into data frame Gfi.dt:
+
+```{r}
+importance <- data.frame(round(importance(fit.rf.Gfi),2))
+importance <- importance[order(-importance$IncNodePurity),]
+threshold = 1.1
+var <- importance %>% 
+  filter(IncNodePurity >= threshold) %>%
+  rownames()
+var
+var <- c(var, "nbv_ratio")
+Gfi.dt <- Gfi.imp[, colnames(Gfi.imp) %in% var]
+```
+
+
+3. Gki
+
+Fit random forests model and select significant variables:
+
+```{r}
+# Separate the data into training set and test set
+set.seed(123)
+train.ind <- createDataPartition(Gki$nbv_ratio, p=0.7)$Resample1 # 70-30 split
+train.set <- Gki.imp[train.ind,]
+test.set <- Gki.imp[-train.ind,]
+dim(train.set)
+dim(test.set)
+
+# Model training
+set.seed(123)
+fit.rf.Gki <- randomForest(nbv_ratio ~., data=train.set, importance=TRUE, na.action=na.pass)
+
+print(fit.rf.Gki, main="randomforest of Gki")
+
+importance <- data.frame(round(importance(fit.rf.Gki),2))
+importance[order(-importance$IncNodePurity),]
+varImpPlot(fit.rf.Gki, n.var = 21)
+plot(fit.rf.Gki,main="randomforest origin")
+```
+
+Performance Evaluation for RF:
+
+```{r}
+pred.Gki <- predict(fit.rf.Gki,newdata=test.set)
+
+pred.Gki <- code.levels(pred.Gki)
+ratio <- code.levels(test.set$nbv_ratio)
+table <- confusionMatrix(pred.Gki, ratio)$table
+table
+
+# predicting accuracy
+sum(diag(table))/sum(table)
+```
+
+Extract the selected variables and save them into data frame Gki.dt:
+
+```{r}
+importance <- data.frame(round(importance(fit.rf.Gki),2))
+importance <- importance[order(-importance$IncNodePurity),]
+threshold = 0.65
+var <- importance %>% 
+  filter(IncNodePurity >= threshold) %>%
+  rownames()
+var
+var <- c(var, "nbv_ratio")
+Gki.dt <- Gki.imp[, colnames(Gki.imp) %in% var]
+```
+
+
+4. Tei
+
+Fit random forests model and select significant variables:
+
+```{r}
+# Separate the data into training set and test set
+set.seed(123)
+train.ind <- createDataPartition(Tei$nbv_ratio, p=0.7)$Resample1 # 70-30 split
+train.set <- Tei.imp[train.ind,]
+test.set <- Tei.imp[-train.ind,]
+dim(train.set)
+dim(test.set)
+
+# Model training
+set.seed(123)
+fit.rf.Tei <- randomForest(nbv_ratio ~., data=train.set, importance=TRUE, na.action=na.pass)
+
+print(fit.rf.Tei, main="randomforest of Tei")
+
+importantce <- data.frame(round(importance(fit.rf.Tei),2))
+importantce[order(-importantce$IncNodePurity),]
+varImpPlot(fit.rf.Tei)
+plot(fit.rf.Tei,main="randomforest origin")
+pred.rf.Tei <- predict(fit.rf.Tei,newdata=test.set,type ="class")
+```
+
+Performance Evaluation for RF:
+
+```{r}
+pred.Tei <- predict(fit.rf.Tei,newdata=test.set)
+
+pred.Tei <- code.levels(pred.Tei)
+ratio <- code.levels(test.set$nbv_ratio)
+table <- confusionMatrix(pred.Tei, ratio)$table
+table
+
+# predicting accuracy
+sum(diag(table))/sum(table)
+```
+
+Extract the selected variables and save them into data frame Tei.dt:
+
+```{r}
+importance <- data.frame(round(importance(fit.rf.Tei),2))
+importance <- importance[order(-importance$IncNodePurity),]
+threshold = 0.5
+var <- importance %>% 
+  filter(IncNodePurity >= threshold) %>%
+  rownames()
+var
+var <- c(var, "nbv_ratio")
+Tei.dt <- Tei.imp[, colnames(Tei.imp) %in% var]
+```
+
+5. Wta
+
+Fit random forests model and select significant variables:
+
+```{r}
+# Separate the data into training set and test set
+set.seed(123)
+train.ind <- createDataPartition(Wta$nbv_ratio, p=0.7)$Resample1 # 70-30 split
+train.set <- Wta.imp[train.ind,]
+test.set <- Wta.imp[-train.ind,]
+dim(train.set)
+dim(test.set)
+
+# Model training
+set.seed(123)
+fit.rf.Wta <- randomForest(nbv_ratio ~., data=train.set, importance=TRUE, na.action=na.pass)
+
+print(fit.rf.Wta, main="randomforest of Dgl")
+
+importantce <- data.frame(round(importance(fit.rf.Wta),2))
+importantce[order(-importantce$IncNodePurity),]
+varImpPlot(fit.rf.Wta)
+plot(fit.rf.Wta,main="randomforest origin")
+pred.rf.Wta <- predict(fit.rf.Wta,newdata=test.set,type ="class")
+```
+
+Performance Evaluation for RF:
+
+```{r}
+pred.Wta <- predict(fit.rf.Wta,newdata=test.set)
+
+pred.Wta <- code.levels(pred.Wta)
+ratio <- code.levels(test.set$nbv_ratio)
+table <- confusionMatrix(pred.Wta, ratio)$table
+table
+
+# predicting accuracy
+sum(diag(table))/sum(table)
+```
+
+Extract the selected variables and save them into data frame Wta.dt:
+
+```{r}
+importantce <- data.frame(round(importance(fit.rf.Wta),2))
+importantce <- importantce[order(-importantce$IncNodePurity),]
+threshold = 0.8
+var <- importantce %>% 
+  filter(IncNodePurity >= threshold) %>%
+  rownames()
+var
+var <- c(var, "nbv_ratio")
+Wta.dt <- Wta.imp[, colnames(Wta.imp) %in% var]
+```
+
+
+6. Dgl
+
+Fit random forests model and select significant variables:
+
+```{r}
+# Separate the data into training set and test set
+set.seed(123)
+train.ind <- createDataPartition(Dgl.imp$nbv_ratio, p=0.7)$Resample1 # 70-30 split
+train.set <- Dgl.imp[train.ind,]
+test.set <- Dgl.imp[-train.ind,]
+dim(train.set)
+dim(test.set)
+
+# Model training
+set.seed(123)
+fit.rf.Dgl <- randomForest(nbv_ratio ~., data=train.set, importance=TRUE, na.action=na.pass)
+
+print(fit.rf.Dgl, main="randomforest of Dgl")
+
+importantce <- data.frame(round(importance(fit.rf.Dgl),2))
+importantce[order(-importantce$IncNodePurity),]
+varImpPlot(fit.rf.Dgl, n.var = 25)
+plot(fit.rf.Dgl,main="randomforest origin")
+```
+
+Performance Evaluation for RF:
+
+```{r}
+pred.Dgl <- predict(fit.rf.Dgl,newdata=test.set)
+
+pred.Dgl <- code.levels(pred.Dgl)
+ratio <- code.levels(test.set$nbv_ratio)
+table <- confusionMatrix(pred.Dgl, ratio)$table
+table
+
+# predicting accuracy
+sum(diag(table))/sum(table)
+```
+
+Extract the selected variables and save them into data frame Dgl.dt:
+
+```{r}
+importance <- data.frame(round(importance(fit.rf.Dgl),2))
+importance <- importance[order(-importance$IncNodePurity),]
+threshold = 0.15
+var <- importance %>% 
+  filter(IncNodePurity >= threshold) %>%
+  rownames()
+var
+var <- c(var, "nbv_ratio")
+Dgl.dt <- Dgl.imp[, colnames(Dgl.imp) %in% var]
+```
+
+
+# 4 Models 
+
+## 4.1 GLM
+
+1. Rbu
+
+```{r}
+fit.glm.Rbu <- glm(nbv_ratio ~ ., data = Rbu.dt, family = gaussian(link = "logit"))
+summary(fit.glm.Rbu)
+par(mfrow=c(2,2))
+plot(fit.glm.Rbu)
+```
+
+AIC and residual analysis:
+
+```{r}
+AIC(fit.glm.Rbu)
+
+residplot <- function(fit) {
+  res <- rstudent(fit)
+  res <- na.omit(res)
+  hist(res, freq = FALSE, breaks = 20, xlab="Studentized Residual")
+  rug(jitter(res))
+  curve(dnorm(x, mean=mean(res), sd=sd(res)), add = TRUE, lwd = 2.5)
+  lines(density(res)$x, density(res)$y, col = "red", lwd = 2.5)
+  legend("topright", legend = c( "Normal Curve", "Kernel Density Curve"), 
+         lty=1:2, col=c("black","red"), cex=.7)
+}
+
+residplot(fit.glm.Rbu)
+pred.Rbu <- predict(fit.glm.Rbu, type = "response")
+res.Rbu <- Rbu.dt$nbv_ratio - pred.Rbu
+mean(res.Rbu^2)
+```
+
+2. Gfi
+
+```{r}
+fit.glm.Gfi <- glm(nbv_ratio ~ ., data = Gfi.dt, family = gaussian(link = "logit"))
+summary(fit.glm.Gfi)
+par(mfrow=c(2,2))
+plot(fit.glm.Gfi)
+```
+
+AIC and residual analysis:
+
+```{r}
+AIC(fit.glm.Gfi)
+residplot(fit.glm.Gfi)
+pred.Gfi <- predict(fit.glm.Gfi, type = "response")
+res.Gfi <- Gfi.dt$nbv_ratio - pred.Gfi
+mean(res.Gfi^2)
+```
+
+3. Gki
+
+```{r}
+fit.glm.Gki <- glm(nbv_ratio ~ ., data = Gki.dt, family = gaussian(link = "logit"))
+summary(fit.glm.Gki)
+par(mfrow=c(2,2))
+plot(fit.glm.Gki)
+```
+
+AIC and residual analysis:
+
+```{r}
+AIC(fit.glm.Gki)
+residplot(fit.glm.Gki)
+pred.Gki <- predict(fit.glm.Gki,type = "response")
+res.Gki <- Gki.dt$nbv_ratio - pred.Gki
+mean(res.Gki^2)
+```
+
+4. Tei
+
+```{r}
+fit.glm.Tei <- glm(nbv_ratio ~ ., data = Tei.dt, family = gaussian(link = "logit"))
+summary(fit.glm.Tei)
+par(mfrow=c(2,2))
+plot(fit.glm.Tei)
+```
+
+AIC and residual analysis:
+
+```{r}
+AIC(fit.glm.Tei)
+residplot(fit.glm.Tei)
+pred.Tei <- predict(fit.glm.Tei,type = "response")
+res.Tei <- Tei.dt$nbv_ratio - pred.Tei
+mean(res.Tei^2)
+```
+
+
+5. Wta
+
+```{r}
+fit.glm.Wta <- glm(nbv_ratio ~ ., data = Wta.dt, family = gaussian(link = "logit"))
+summary(fit.glm.Wta)
+par(mfrow=c(2,2))
+plot(fit.glm.Wta)
+```
+
+AIC and residual analysis:
+
+```{r}
+AIC(fit.glm.Wta)
+residplot(fit.glm.Wta)
+pred.Wta <- predict(fit.glm.Wta,type = "response")
+res.Wta <- Wta.dt$nbv_ratio - pred.Wta
+mean(res.Wta^2)
+```
+
+
+6. Dgl
+
+```{r}
+Dgl.dt <- Dgl.dt %>%
+  filter(nbv_ratio > 1e-5)
+fit.glm.Dgl <- glm(nbv_ratio ~ ., data = Dgl.dt, family = gaussian(link = "logit"))
+summary(fit.glm.Dgl)
+par(mfrow=c(2,2))
+plot(fit.glm.Dgl)
+```
+
+AIC and residual analysis:
+
+```{r}
+AIC(fit.glm.Dgl)
+residplot(fit.glm.Dgl)
+pred.Dgl <- predict(fit.glm.Dgl,type = "response")
+res.Dgl <- Dgl.dt$nbv_ratio - pred.Dgl
+mean(res.Dgl^2)
+```
+
+
+## 4.2 GAM
+
+1. Rbu
+
+```{r}
+set.seed(123)
+train.ind <- createDataPartition(Rbu.dt$nbv_ratio, p=0.7)$Resample1 # 70-30 split
+train.set <- Rbu.dt[train.ind,]
+test.set <- Rbu.dt[-train.ind,]
+
+# initial model 
+# AIC: -10085.62 0.47
+f <- as.formula(nbv_ratio ~ s(x_utm) + s(year) + s(tree_age) + s(n_trees) + geol_no + soil_no + slope_dir + s(Ed) + s(H_bhd) + fruct_lev + s(tmin_may) + s(prec_y) + s(et0_y) + s(cwb_y) + s(globrad_y_lag1)+ s(prec_y_lag1) + s(et0_y_lag1) + s(cwb_y_lag1) + s(spei_3_may) + s(n_tot_wd) + s(ac_tot_wd) + s(s_vals))
+gam.Rbu <- bam(f, data = train.set, family = gaussian(link = "logit"), discrete = TRUE)
+summary(gam.Rbu)
+AIC(gam.Rbu)
+par(mfrow=c(2,2))
+gam.check(gam.Rbu)
+```
+
+Improved gam model:
+
+```{r}
+# -10122.14 0.473
+f.Rbu <- as.formula(nbv_ratio ~ s(x_utm,k=60,bs="cr") + s(year,k=20,bs="cr") + s(tree_age) + geol_no + soil_no + s(Ed) + fruct_lev + s(tmin_may) + s(prec_y) + s(globrad_y_lag1,k=20,bs="cr") + s(cwb_y_lag1) + s(n_tot_wd) + te(ac_tot_wd,n_tot_wd))
+
+fit.gam.Rbu <- bam(f.Rbu, data = train.set, family = gaussian(link = "logit"), discrete = TRUE)
+summary(fit.gam.Rbu)
+
+plot(fit.gam.Rbu,pages=1)
+
+AIC(fit.gam.Rbu)
+par(mfrow=c(2,2))
+gam.check(fit.gam.Rbu)
+```
+
+```{r}
+vis.gam(fit.gam.Rbu, view = c("ac_tot_wd","n_tot_wd"), plot.type="contour",color="topo")
+
+pred.Rbu <- predict(fit.gam.Rbu,newdata = test.set, type = "response")
+res.Rbu <- test.set$nbv_ratio - pred.Rbu
+mean(res.Rbu^2)
+```
+
+
+2. Gfi
+
+```{r}
+set.seed(123)
+train.ind <- createDataPartition(Gfi.dt$nbv_ratio, p=0.7)$Resample1 # 70-30 split
+train.set <- Gfi.dt[train.ind,]
+test.set <- Gfi.dt[-train.ind,]
+
+# initial model 
+# AIC: -17557.56 R2: 0.562
+f <- as.formula(nbv_ratio ~ s(tree_age) + s(Ed) + s(H_bhd) + s(year) + slope_dir + geol_no + s(x_utm) + s(s_vals) + soil_no + crown_lev + s(ac_tot_wd) + s(n_trees) + s(prec_y) + s(y_utm) + s(spei_3_may) + s(n_tot_wd) + s(et0_y_lag1) + s(spei_24_oct) + s(cwb_y) + s(alt_m) + s(et0_y) + s(skel_perc))
+gam.Gfi <- bam(f, data = train.set, family = gaussian(link = "logit"), discrete = TRUE)
+summary(gam.Gfi)
+AIC(gam.Gfi)
+par(mfrow=c(2,2))
+gam.check(gam.Gfi)
+```
+
+Improved gam model:
+
+```{r}
+# -17967.57 0.587
+f.Gfi <- as.formula(nbv_ratio ~ s(tree_age) + s(H_bhd,k=20,bs="cr") + s(year,k=30,bs="cr") + slope_dir + geol_no + soil_no + crown_lev + s(ac_tot_wd,k=40,bs="cr") + s(n_trees) + s(spei_24_oct) + s(alt_m,k=40,bs="cr") + s(skel_perc,k=20) + te(year,x_utm,y_utm,d=c(1,2)))
+
+fit.gam.Gfi <- bam(f.Gfi, data = train.set, family = gaussian(link = "logit"), discrete = TRUE)
+summary(fit.gam.Gfi)
+
+plot(fit.gam.Gfi,pages=1)
+## run some basic model checks, including checking
+## smoothing basis dimensions...
+AIC(fit.gam.Gfi)
+par(mfrow=c(2,2))
+gam.check(fit.gam.Gfi, k.sample = 20000)
+```
+
+
+```{r}
+pred.Gfi <- predict(fit.gam.Gfi,newdata = test.set, type = "response")
+res.Gfi <- test.set$nbv_ratio - pred.Gfi
+mean(res.Gfi^2)
+```
+
+
+3. Gki
+
+```{r}
+set.seed(123)
+train.ind <- createDataPartition(Gki.dt$nbv_ratio, p=0.7)$Resample1 # 70-30 split
+train.set <- Gki.dt[train.ind,]
+test.set <- Gki.dt[-train.ind,]
+
+# initial model
+# AIC: -3591.636, R2: 0.15
+f <- as.formula(nbv_ratio ~ s(tree_age) + slope_dir + soil_ty_no + s(ac_tot_wd) + s(depth_mm) + s(y_utm) + s(nfk) + soil_no + s(prec_y_lag1) + s(et0_y_lag1) + s(defsum_awat04_d) + s(x_utm) + s(globrad_y) + s(cwb_y_lag1) + s(n_tot_wd) + s(et0_y) + s(tmin_may) + s(spei_12_oct) + s(H_bhd) + s(Es) + s(globrad_y_lag1))
+
+gam.Gki <- bam(f, data = train.set, family = gaussian(link = "logit"), discrete = TRUE)
+summary(gam.Gki)
+AIC(gam.Gki) #-16052.78
+par(mfrow=c(2,2))
+gam.check(gam.Gki)
+```
+
+Improved gam model:
+
+```{r}
+# -3617.015 0.152
+f.Gki <- as.formula(nbv_ratio ~ s(tree_age,k=30,bs="cr") + slope_dir + soil_ty_no + s(ac_tot_wd) + s(nfk,k=30,bs="cr") + soil_no + s(prec_y_lag1) + s(et0_y_lag1) + s(globrad_y,k=80,bs="cr") + s(et0_y) + s(spei_12_oct) + te(x_utm,y_utm))
+
+fit.gam.Gki <- bam(f.Gki, data = train.set, family = gaussian(link = "logit"), discrete = TRUE)
+summary(fit.gam.Gki)
+
+plot(fit.gam.Gki,pages=1)
+## run some basic model checks, including checking
+## smoothing basis dimensions...
+AIC(fit.gam.Gki)
+par(mfrow=c(2,2))
+gam.check(fit.gam.Gki)
+```
+
+
+```{r}
+vis.gam(fit.gam.Gki, view = c("x_utm","y_utm"), plot.type="contour",color="topo")
+
+pred.Gki <- predict(fit.gam.Gki,newdata = test.set, type = "response")
+res.Gki <- test.set$nbv_ratio - pred.Gki
+mean(res.Gki^2)
+```
+
+
+4. Tei
+
+```{r}
+set.seed(123)
+train.ind <- createDataPartition(Tei.dt$nbv_ratio, p=0.7)$Resample1 # 70-30 split
+train.set <- Tei.dt[train.ind,]
+test.set <- Tei.dt[-train.ind,]
+
+# initial model
+# AIC: -4735.827, R2: 0.383
+f <- as.formula(nbv_ratio ~ s(tree_age) + s(year) + s(ac_tot_wd) + s(n_tot_wd) + slope_dir + soil_no + s(H_bhd) + s(alt_m) + soil_ty_no + s(tmean_y_lag1) + s(globrad_y_lag1) + s(spei_3_may) + s(tpi500) + s(tmin_may) + s(globrad_y) + s(tpi1000) + geol_no + s(x_utm) + s(spei_24_oct) + s(nfk))
+
+gam.Tei <- bam(f, data = train.set, family = gaussian(link = "logit"), discrete = TRUE)
+summary(gam.Tei)
+AIC(gam.Tei)
+par(mfrow=c(2,2))
+gam.check(gam.Tei)
+```
+
+Improved gam model:
+
+```{r}
+# -4807.511 0.405
+f.Tei <- as.formula(nbv_ratio ~ s(tree_age,k=20,bs="cr") + s(year,k=20,bs="cr") + slope_dir + soil_no + soil_ty_no + s(tmean_y_lag1) + s(globrad_y_lag1) + s(spei_3_may) + geol_no + s(x_utm,k=20,bs="cr") + s(nfk,k=20,bs="cr") + te(tpi500,tpi1000) + s(alt_m,by=soil_no))
+
+fit.gam.Tei <- bam(f.Tei, data = train.set, family = gaussian(link = "logit"), discrete = TRUE)
+summary(fit.gam.Tei)
+
+#plot(fit.gam.Tei)
+## run some basic model checks, including checking
+## smoothing basis dimensions...
+AIC(fit.gam.Tei)
+par(mfrow=c(2,2))
+gam.check(fit.gam.Tei)
+```
+
+
+```{r}
+vis.gam(fit.gam.Tei, view = c("tpi500","tpi1000"), plot.type="contour",color="topo")
+
+pred.Tei <- predict(fit.gam.Tei,newdata = test.set, type = "response")
+res.Tei <- test.set$nbv_ratio - pred.Tei
+mean(res.Tei^2)
+```
+
+5. Wta
+
+```{r}
+set.seed(123)
+train.ind <- createDataPartition(Wta.dt$nbv_ratio, p=0.7)$Resample1 # 70-30 split
+train.set <- Wta.dt[train.ind,]
+test.set <- Wta.dt[-train.ind,]
+
+# initial model
+# AIC: -5370.204, R2: 0.455
+f <- as.formula(nbv_ratio ~ s(tree_age) + s(ac_tot_wd) + s(n_tot_wd) + s(n_trees) + slope_dir + crown_lev + s(y_utm) + s(year) + soil_no + s(alt_m) + s(x_utm) + s(skel_perc) + s(depth_mm) + s(s_vals) + s(tpi500) + geol_no + s(spei_3_may) + s(H_spec) + s(Es) + s(H_bhd) + s(globrad_y) + s(spei_24_oct) + s(globrad_y_lag1))
+
+gam.Wta <- bam(f, data = train.set, family = gaussian(link = "logit"), discrete = TRUE)
+summary(gam.Wta)
+AIC(gam.Wta)
+par(mfrow=c(2,2))
+gam.check(gam.Wta)
+```
+
+```{r}
+# -5484.726 0.475
+f.Wta <- as.formula(nbv_ratio ~ slope_dir + soil_no + crown_lev + s(tree_age,bs="cr",k=20) + s(y_utm,by=year,k=20) + s(ac_tot_wd,bs="cr") + s(n_trees,bs="cr") + s(alt_m,k=20) +  s(Es,bs="cr") + s(spei_3_may,bs="cr") + s(globrad_y,bs="cr") + s(depth_mm,k=40,bs="cr") + s(skel_perc,k=40,bs="cr") + s(spei_24_oct) + te(y_utm,tpi500))
+
+fit.gam.Wta <- bam(f.Wta, data = train.set, family = gaussian(link = "logit"), discrete = TRUE)
+summary(fit.gam.Wta)
+
+plot(fit.gam.Wta,pages=1)
+## run some basic model checks, including checking
+## smoothing basis dimensions...
+AIC(fit.gam.Wta)
+par(mfrow=c(2,2))
+gam.check(fit.gam.Wta, k.sample = 20000)
+```
+
+```{r}
+vis.gam(fit.gam.Wta, view = c("y_utm","tpi500"), plot.type="contour",color="topo")
+vis.gam(fit.gam.Wta, view = c("y_utm","year"), plot.type="contour",color="topo")
+
+pred.Wta <- predict(fit.gam.Wta,newdata = test.set, type = "response")
+res.Wta <- test.set$nbv_ratio - pred.Wta
+mean(res.Wta^2)
+```
+
+6. Dgl
+
+```{r}
+Dgl.dt <- Dgl.imp[, colnames(Dgl.imp) %in% var]
+Dgl.dt <- Dgl.dt %>%
+  filter(nbv_ratio > 1e-3)
+
+set.seed(123)
+train.ind <- createDataPartition(Dgl.dt$nbv_ratio, p=0.7)$Resample1 # 70-30 split
+train.set <- Dgl.dt[train.ind,]
+test.set <- Dgl.dt[-train.ind,]
+
+# initial model
+# AIC: -939.4642, R2: 0.551
+f <- as.formula(nbv_ratio ~ s(tree_age) + s(H_bhd) + s(Ed) + slope_dir + s(twi50_mf) + s(year) + s(prec_y_lag1) + s(s_vals) + s(H_spec) + s(spei_3_aug) + s(cwb_y_lag1) + s(ac_tot_wd) + s(cwb_y) + source + soil_no + s(prec_y) + s(twi50) + s(Es) + s(tmean_y) + s(tmean_y_lag1) + s(spei_12_oct) + s(n_tot_wd) + s(twi100))
+
+gam.Dgl <- bam(f, data = train.set, family = gaussian(link = "logit"), discrete = TRUE)
+summary(gam.Dgl)
+AIC(gam.Dgl)
+par(mfrow=c(2,2))
+gam.check(gam.Dgl)
+```
+
+
+```{r}
+# -1335.326 0.562
+f.Dgl <- as.formula(nbv_ratio ~ s(tree_age) + s(H_bhd,k=40,bs="cr") + s(Ed,bs="cr") + slope_dir + s(year) + s(s_vals,k=40,bs="cr") + s(H_spec,k=40,bs="cr") + soil_no + s(prec_y) + s(twi50,k=40,bs="cr") + s(tmean_y) + s(tmean_y_lag1) + s(spei_12_oct) + s(twi100,k=40,bs="cr"))
+
+fit.gam.Dgl <- bam(f.Dgl, data = train.set, family = gaussian(link = "logit"), discrete = TRUE)
+summary(fit.gam.Dgl)
+
+plot(fit.gam.Dgl,pages=1)
+## run some basic model checks, including checking
+## smoothing basis dimensions...
+AIC(fit.gam.Dgl) #-915.9436
+par(mfrow=c(2,2))
+gam.check(fit.gam.Dgl)
+```
+
+```{r}
+pred.Dgl <- predict(fit.gam.Dgl,newdata = test.set, type = "response")
+res.Dgl <- test.set$nbv_ratio - pred.Dgl
+mean(res.Dgl^2)
+```
+
+
+# 5 Model Checking and Comparison
+
+# 5.1 GLM
+
+Cross-validation:
+
+```{r}
+num.folds <- 10
+
+glm.cv <- function(data, num.folds) {
+  pb = txtProgressBar(style = 3)
+  n <- nrow(data)
+  set.seed(123)
+  folds <- createFolds(data[,"nbv_ratio"], k = num.folds) # get indices of the test sets
+  fit <- NULL
+  pred <- NULL
+  MSE <- rep(0, num.folds)
+  for (f in 1:length(folds)) {
+    setTxtProgressBar(pb,f/num.folds)
+    fit[[f]] <- glm(nbv_ratio ~ ., data=data[-folds[[f]],], family=gaussian(link="logit"))
+    # This is equivalent to doing 10, 90-10 splits we are fitting the model on all but 1/10th of the data ten times.
+    pred[[f]] <- predict(fit[[f]], newdata = data[folds[[f]],], type = "response")
+    res <- data[folds[[f]],][,"nbv_ratio"] - pred[[f]]
+    MSE[f] <- mean(res^2)
+  }
+  close(pb)
+  MSE <- round(mean(MSE),4)
+  return(MSE)
+}
+
+Rbu.cv <- glm.cv(Rbu.dt, 10)
+Gfi.cv <- glm.cv(Gfi.dt, 10)
+Gki.cv <- glm.cv(Gki.dt, 10)
+Tei.cv <- glm.cv(Tei.dt, 10)
+Wta.cv <- glm.cv(Wta.dt, 10)
+Dgl.cv <- glm.cv(Dgl.dt, 10)
+
+species <- c("Rbu","Gfi", "Gki", "Tei", "Wta", "Dgl")
+glm.MSE <- c(Rbu.cv, Gfi.cv, Gki.cv, Tei.cv,Wta.cv, Dgl.cv)
+cvglm <- data.frame(species, glm.MSE)
+cvglm
+```
+
+# 5.2 GAM
+
+Cross-validation:
+
+```{r}
+num.folds <- 10
+
+gam.cv <- function(data, num.folds, formula) {
+  pb = txtProgressBar(style = 3)
+  n <- nrow(data)
+  set.seed(123)
+  folds <- createFolds(data[,"nbv_ratio"], k = num.folds) # get indices of the test sets
+  fit <- NULL
+  pred <- NULL
+  MSE <- rep(0, num.folds)
+  for (f in 1:length(folds)) {
+    setTxtProgressBar(pb,f/num.folds)
+    fit[[f]] <- bam(formula, data=data[-folds[[f]],], family=gaussian(link="logit"),
+                    discrete = TRUE)
+    # This is equivalent to doing 10, 90-10 splits we are fitting the model on all but 1/10th of the data ten times.
+    pred[[f]] <- predict(fit[[f]], newdata = data[folds[[f]],], type = "response")
+    res <- data[folds[[f]],][,"nbv_ratio"] - pred[[f]]
+    MSE[f] <- mean(res^2)
+  }
+  close(pb)
+  MSE <- round(mean(MSE), 4)
+  return(MSE)
+}
+
+Rbu.gam.cv <- gam.cv(Rbu.dt, num.folds, f.Rbu)
+Gfi.gam.cv <- gam.cv(Gfi.dt, num.folds, f.Gfi)
+Gki.gam.cv <- gam.cv(Gki.dt, num.folds, f.Gki)
+Tei.gam.cv <- gam.cv(Tei.dt, num.folds, f.Tei)
+Wta.gam.cv <- gam.cv(Wta.dt, num.folds, f.Wta)
+Dgl.gam.cv <- gam.cv(Dgl.dt, num.folds, f.Dgl)
+
+species <- c("Rbu", "Gfi", "Gki", "Tei", "Wta", "Dgl")
+gam.MSE <- c(Rbu.gam.cv, Gfi.gam.cv, Gki.gam.cv, Tei.gam.cv,Wta.gam.cv, Dgl.gam.cv)
+# 0.0077, 0.0060, 0.0142, 0.0098, 0.0109, 0.0084
+cvgam <- data.frame(species, gam.MSE)
+cvgam
+```
+
+
+# 6 Conclusion
+
+Calculate the optimal range in terms of those significant covariates:
+
+```{r}
+ind.rbu <- which(pred.Rbu <= 0.15)
+ind.gfi <- which(pred.Gfi <= 0.15)
+ind.gki <- which(pred.Gki <= 0.15)
+ind.tei <- which(pred.Tei <= 0.15)
+ind.wta <- which(pred.Wta <= 0.15)
+ind.dgl <- which(pred.Dgl <= 0.15)
+
+var1 <- c("x_utm","tree_age","Ed","tmin_may","prec_y","globrad_y_lag1","cwb_y_lag1","n_tot_wd","ac_tot_wd")
+
+var2 <- c("x_utm","y_utm","tree_age","H_bhd","ac_tot_wd","n_trees","spei_24_oct","alt_m","skel_perc")
+
+var3 <- c("x_utm","tree_age","ac_tot_wd","nfk","prec_y_lag1","et0_y_lag1","globrad_y","et0_y","spei_12_oct")
+
+var4 <- c("tree_age","tmean_y_lag1","globrad_y_lag1","spei_3_may","x_utm","nfk","tpi500","tpi1000","alt_m")
+
+var5 <- c("y_utm","tree_age","alt_m","Es","spei_3_may","globrad_y","depth_mm","skel_perc","spei_24_oct","tpi500")
+
+var6 <- c("tree_age","H_bhd","Ed","year","s_vals","H_spec","prec_y","twi50","tmean_y","tmean_y_lag1","spei_12_oct","twi100")
+
+v1 <- union(var1, var2)
+v2 <- union(v1, var3)
+v3 <- union(v2, var4)
+v4 <- union(v3, var5)
+
+var <- c("H_bhd", "tmin_may", "prec_y", "globrad_y_lag1", "spei_3_may", "spei_12_oct", "spei_24_oct", "alt_m",  "ac_tot_wd","tpi500")
+
+opt <- rbind(Rbu[ind.rbu, colnames(Rbu) %in% var],
+             Gfi[ind.gfi, colnames(Gfi) %in% var],
+             Gki[ind.gki, colnames(Gki) %in% var],
+             Tei[ind.tei, colnames(Tei) %in% var],
+             Wta[ind.wta, colnames(Wta) %in% var],
+             Dgl[ind.dgl, colnames(Dgl) %in% var])
+
+
+summary(opt)
+
+range <- c("(310, 630)", "(2.370, 2.690)", "(-5.070, -1.770)", "(786.2, 1103.8)", "(3808, 4099)", "(-0.97, 1.12)", "(-0.6075, 0.6775)", "(-0.22, 0.95)", "(477.5, 768.8)", "(-6.7, 10.9)")
+
+opt.range <- data.frame("Variable" = var, "Optimal Range" = range)
+
+
+
+var_1 <- c("x_utm", "y_utm", "tree_sp_eu")
+
+area <- rbind(Rbu[ind.rbu, colnames(Rbu) %in% var_1],
+             Gfi[ind.gfi, colnames(Gfi) %in% var_1],
+             Gki[ind.gki, colnames(Gki) %in% var_1],
+             Tei[ind.tei, colnames(Tei) %in% var_1],
+             Wta[ind.wta, colnames(Wta) %in% var_1],
+             Dgl[ind.dgl, colnames(Dgl) %in% var_1])
+
+# The distribution of optimal location for six tree species
+ggplot(
+  area,
+  aes(
+    x = x_utm,
+    y = y_utm
+  )
+) +
+  geom_point(
+    aes(
+      color = tree_sp_eu
+    )
+  ) +
+  scale_color_hc() +
+  theme_minimal()
+  
+```
+
